@@ -1189,12 +1189,16 @@ RGB_PKEY_INIT = lambda key: [
     buf([key, 0x05, 0x20, 0x31, 0x00, 0x08]),
 ]
 
-RGB_INIT = [
-    buf([FEATURE_KBD_REPORT_ID, 0xB9]),
-    *RGB_PKEY_INIT(FEATURE_KBD_LED_REPORT_ID1),
-    *RGB_PKEY_INIT(FEATURE_KBD_LED_REPORT_ID2),
-]
+import os
 
+if not os.environ["HHD_SKIP_INIT"]:
+    RGB_INIT = [
+        buf([FEATURE_KBD_REPORT_ID, 0xB9]),
+        *RGB_PKEY_INIT(FEATURE_KBD_LED_REPORT_ID1),
+        *RGB_PKEY_INIT(FEATURE_KBD_LED_REPORT_ID2),
+    ]
+else:
+    RGB_INIT = []
 
 # RGB on when
 # "5a d1 09 01 0f <- val bit"
