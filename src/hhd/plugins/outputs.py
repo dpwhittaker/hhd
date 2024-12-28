@@ -232,7 +232,7 @@ def get_outputs(
             "rgb_zones": rgb_zones,
             "is_dual": False,
             "steam_check": steam_check,
-            "steam_check_fn": lambda: emit and is_steam_gamepad_running(emit.ctx),
+            "steam_check_fn": lambda: emit and desktop_disable and is_steam_gamepad_running(emit.ctx),
             "steam_kbd": lambda open: open_steam_kbd(emit, open),
             "nintendo_qam": nintendo_qam,
             "uses_motion": motion,

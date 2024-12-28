@@ -1,11 +1,15 @@
+import ctypes
+from fcntl import ioctl
 import logging
 import select
+import struct
 import time
 from threading import Event as TEvent
 from typing import Sequence
 
 from hhd.controller import DEBUG_MODE, Axis, Event, Multiplexer, can_read
 from hhd.controller.lib.hide import unhide_all
+from hhd.controller.lib.ioctl import EVIOCSMASK
 from hhd.controller.physical.evdev import DINPUT_AXIS_POSTPROCESS, AbsAxis
 from hhd.controller.physical.evdev import B as EC
 from hhd.controller.physical.evdev import (
@@ -253,6 +257,87 @@ class AllyXHidraw(GenericGamepadHidraw):
             )
             self.dev.write(cmd)
 
+class Touchscreen(GenericGamepadEvdev):
+    def __init__(self, *args, **kwargs) -> None:
+        if "axis_map" not in kwargs:
+            kwargs["axis_map"] = {
+                EC("ABS_MT_SLOT"): "slot",
+                EC("ABS_MT_POSITION_X"): "x",
+                EC("ABS_MT_POSITION_Y"): "y",
+                EC("ABS_MT_TRACKING_ID"): "id"
+            }
+        super().__init__(*args, **kwargs)
+        self.code_map = {EC("SYN_REPORT"): "syn", **self.axis_map}
+        self.touchstate = [{"x": 0, "y": 0, "id": -1}, {"x": 0, "y": 0, "id": -1}]
+        self.touchstart = [{"x": 0, "y": 0, "t": 0}, {"x": 0, "y": 0, "t": 0}]
+        self.slot = 0
+
+
+    def open(self) -> Sequence[int]:
+        a = super().open()
+        b_len = max((max(self.axis_map) >> 3) + 1, 8)
+        mask = bytearray(b_len)
+        for b in self.axis_map:
+            mask[b >> 3] |= 1 << (b & 0x07)
+        c_mask = ctypes.create_string_buffer(bytes(mask))
+        data = struct.pack("@ I I L", EC("EV_ABS"), b_len, ctypes.addressof(c_mask))
+        logger.info(f"Activating axes {self.axis_map} {bytes(mask).hex()}")
+        ioctl(self.fd, EVIOCSMASK, data)
+        ioctl(self.fd, EVIOCSMASK, struct.pack("@ I I L", EC("EV_MSC"), 0, 0))
+        ioctl(self.fd, EVIOCSMASK, struct.pack("@ I I L", EC("EV_KEY"), 0, 0))
+        #After
+        #ioctl(self.fd, EVIOCGMASK, data)
+        #print(bytes(mask).hex())
+        return a
+    
+    def produce(self, fds) -> Sequence[Event]:
+        try:
+            evs = []
+            curr = time.time()
+            while len(self.queue) and curr >= self.queue[0][1]:
+                evs.append(self.queue.pop(0)[0])
+
+            if self.fd not in fds: return evs
+            touched = None
+            state = self.touchstate[self.slot]
+            start = self.touchstart[self.slot]
+            while can_read(self.fd):
+                for ev in self.dev.read():
+                    if ev.code not in self.code_map: continue
+                    code = self.code_map[ev.code]
+                    #logger.info(f"{ev.timestamp()} {evdev.ecodes.EV[ev.type]} {code}: {ev.value}")
+                    if code == "slot":
+                        self.slot = ev.value
+                        state = self.touchstate[self.slot]
+                        start = self.touchstart[self.slot]
+                    elif code == "syn":
+                        touched = ev.timestamp()
+                        for slot in range(2):
+                            state = self.touchstate[slot]
+                            start = self.touchstart[slot]
+                            touch = "touchpad_touch" if self.slot == 0 else "touchpad_touch2"
+                            if state["id"] == -1 and start["t"] > 0:
+                                if (touched - start["t"] < 0.1 and all(state[k] == start[k] for k in ["x", "y"])):
+                                    evs.append({"type": "button", "code": "touchpad_left", "value": True})
+                                    self.queue.append(({"type": "button", "code": "touchpad_left", "value": False}, 0))
+                                self.queue.append(({"type": "button", "code": touch, "value": False}, 0))
+                                start["t"] = 0
+                            elif state["id"] != -1 and start["t"] == 0:
+                                evs.append({"type": "button", "code": touch, "value": True})
+                                start["x"], start["y"], start["t"] = state["x"], state["y"], touched
+                    elif self.slot < 2:
+                        self.touchstate[self.slot][code] = ev.value
+                        if code == "x":
+                            x = (min(ev.value, 200) if ev.value < 1720 else ev.value - 1520) / 400
+                            evs.append({"type": "axis", "code": f"touchpad_x{"2" if self.slot == 1 else ""}", "value": x})
+                        elif code == "y":
+                            y = max(min((ev.value - 340) / 200, 1), 0)
+                            evs.append({"type": "axis", "code": f"touchpad_y{"2" if self.slot == 1 else ""}", "value": y})
+            #for ev in evs: logger.info(ev)
+            return evs
+        except Exception as e:
+            logger.error(f"Error while producing events: {e}")
+            raise(e)
 
 def plugin_run(
     conf: Config,
@@ -305,11 +390,14 @@ def controller_loop(
     conf: Config, should_exit: TEvent, updated: TEvent, emit: Emitter, ally_x: bool
 ):
     debug = DEBUG_MODE
-
+    touch = Config()
+    touch["mode"] = "controller"
+    touch["controller.correction"] = "stretch"
+    touch["controller.desktop_disable"] = False
     # Output
     d_producers, d_outs, d_params = get_outputs(
         conf["controller_mode"],
-        None,
+        touch,
         conf["imu"].to(bool),
         emit=emit,
         rgb_modes={
@@ -385,6 +473,9 @@ def controller_loop(
     )
     d_kbd_grabbed = False
 
+    logger.info("Searching for touchscreen device")
+    d_touchscreen = Touchscreen(vid=[0x0603], pid=[0xF200], required=True, grab=True)
+
     multiplexer = Multiplexer(
         trigger="analog_to_discrete",
         dpad="analog_to_discrete",
@@ -426,6 +517,7 @@ def controller_loop(
             if d_timer.open():
                 prepare(d_imu)
         prepare(d_kbd_1)
+        prepare(d_touchscreen)
         for d in d_producers:
             prepare(d)
 
@@ -443,7 +535,7 @@ def controller_loop(
                 if id(d) in to_run:
                     evs.extend(d.produce(r))
             evs.extend(d_vend.produce(r))
-
+            evs.extend(d_touchscreen.produce(r))
             evs = multiplexer.process(evs)
             if evs:
                 if debug:

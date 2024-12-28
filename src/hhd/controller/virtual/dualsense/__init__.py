@@ -433,6 +433,28 @@ class Dualsense(Producer, Consumer):
                                 (y & 0x0F) << 4
                             )
                             new_rep[self.ofs + 35] = y >> 4
+                        case "touchpad_x2":
+                            tc = self.touch_correction
+                            x = int(
+                                min(max(ev["value"], tc.x_clamp[0]), tc.x_clamp[1])
+                                * tc.x_mult
+                                + tc.x_ofs
+                            )
+                            new_rep[self.ofs + 37] = x & 0xFF
+                            new_rep[self.ofs + 38] = (new_rep[self.ofs + 38] & 0xF0) | (
+                                x >> 8
+                            )
+                        case "touchpad_y2":
+                            tc = self.touch_correction
+                            y = int(
+                                min(max(ev["value"], tc.y_clamp[0]), tc.y_clamp[1])
+                                * tc.y_mult
+                                + tc.y_ofs
+                            )
+                            new_rep[self.ofs + 38] = (new_rep[self.ofs + 38] & 0x0F) | (
+                                (y & 0x0F) << 4
+                            )
+                            new_rep[self.ofs + 39] = y >> 4
                         case "gyro_ts" | "accel_ts" | "imu_ts":
                             send = True
                             self.last_imu = time.perf_counter()
