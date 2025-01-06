@@ -1,12 +1,15 @@
 import ctypes
 from fcntl import ioctl
 import logging
+import re
 import select
 import struct
 import time
+import math
 from threading import Event as TEvent
 from typing import Sequence
-
+from types import SimpleNamespace
+from evdev import InputEvent
 from hhd.controller import DEBUG_MODE, Axis, Event, Multiplexer, can_read
 from hhd.controller.lib.hide import unhide_all
 from hhd.controller.lib.ioctl import EVIOCSMASK
@@ -21,6 +24,7 @@ from hhd.controller.physical.evdev import (
 from hhd.controller.physical.hidraw import GenericGamepadHidraw, enumerate_unique
 from hhd.controller.physical.imu import CombinedImu, HrtimerTrigger
 from hhd.plugins import Config, Context, Emitter, get_limits, get_outputs
+from hhd.plugins.utils import load_relative_yaml
 
 from .const import config_rgb
 from .hid import RgbCallback, switch_mode
@@ -258,7 +262,7 @@ class AllyXHidraw(GenericGamepadHidraw):
             self.dev.write(cmd)
 
 class Touchscreen(GenericGamepadEvdev):
-    def __init__(self, *args, **kwargs) -> None:
+    def __init__(self, touchscreen_conf, emit, *args, **kwargs) -> None:
         if "axis_map" not in kwargs:
             kwargs["axis_map"] = {
                 EC("ABS_MT_SLOT"): "slot",
@@ -268,9 +272,14 @@ class Touchscreen(GenericGamepadEvdev):
             }
         super().__init__(*args, **kwargs)
         self.code_map = {EC("SYN_REPORT"): "syn", **self.axis_map}
-        self.touchstate = [{"x": 0, "y": 0, "id": -1}, {"x": 0, "y": 0, "id": -1}]
-        self.touchstart = [{"x": 0, "y": 0, "t": 0}, {"x": 0, "y": 0, "t": 0}]
+        self.state = [
+            SimpleNamespace(id=-1, x=0, y=0, t=0, sx=0, sy=0, tx=0, ty=0, btn=None),
+            SimpleNamespace(id=-1, x=0, y=0, t=0, sx=0, sy=0, tx=0, ty=0, btn=None)
+        ]
         self.slot = 0
+        self.shortcuts = touchscreen_conf
+        self.emit = emit
+        self.jitter = 1.0 / 1920
 
 
     def open(self) -> Sequence[int]:
@@ -293,47 +302,76 @@ class Touchscreen(GenericGamepadEvdev):
     def produce(self, fds) -> Sequence[Event]:
         try:
             evs = []
+            inp = []
             curr = time.time()
             while len(self.queue) and curr >= self.queue[0][1]:
                 evs.append(self.queue.pop(0)[0])
 
-            if self.fd not in fds: return evs
-            touched = None
-            state = self.touchstate[self.slot]
-            start = self.touchstart[self.slot]
+            t = None
+            state = self.state[self.slot]
             while can_read(self.fd):
                 for ev in self.dev.read():
-                    if ev.code not in self.code_map: continue
-                    code = self.code_map[ev.code]
-                    #logger.info(f"{ev.timestamp()} {evdev.ecodes.EV[ev.type]} {code}: {ev.value}")
-                    if code == "slot":
-                        self.slot = ev.value
-                        state = self.touchstate[self.slot]
-                        start = self.touchstart[self.slot]
-                    elif code == "syn":
-                        touched = ev.timestamp()
-                        for slot in range(2):
-                            state = self.touchstate[slot]
-                            start = self.touchstart[slot]
-                            touch = "touchpad_touch" if self.slot == 0 else "touchpad_touch2"
-                            if state["id"] == -1 and start["t"] > 0:
-                                if (touched - start["t"] < 0.1 and all(state[k] == start[k] for k in ["x", "y"])):
+                    inp.append(ev)
+            
+            jitter = 0
+            if len(inp) == 0:
+                usec, sec = math.modf(curr)
+                usec = int(usec * 1000000)
+                inp.append(InputEvent(sec, usec, EC("EV_SYN"), EC("SYN_REPORT"), 1))
+                jitter = self.jitter
+                self.jitter = -self.jitter
+            for ev in inp:
+                if ev.code not in self.code_map: continue
+                code = self.code_map[ev.code]
+                #logger.info(f"{ev.timestamp()} {evdev.ecodes.EV[ev.type]} {code}: {ev.value}")
+                if code == "slot":
+                    self.slot = ev.value
+                    if ev.value > 1: continue
+                    state = self.state[self.slot]
+                elif code == "syn":
+                    t = curr
+                    if ev.timestamp: t = ev.timestamp()
+                    for slot in range(2):
+                        state = self.state[slot]
+                        if state.t > 0: btn = state.btn
+                        elif state.y < 270: btn = self.shortcuts["left_top" if state.x < 960 else "right_top"].to(str)
+                        elif state.y > 810: btn = self.shortcuts["top" if state.x < 960 else "bottom"].to(str)
+                        elif state.y > 540: btn = self.shortcuts["left_bottom" if state.x < 960 else "right_bottom"].to(str)
+                        else: btn = "touchpad_touch" if self.slot == 0 else "touchpad_touch2"
+                        if state.id == -1 and state.t > 0:
+                            if btn in ("touchpad_touch", "touchpad_touch2"):
+                                if t - state.t < 0.1 and abs(state.x-state.sx) + abs(state.y-state.sy) < 0.05:
                                     evs.append({"type": "button", "code": "touchpad_left", "value": True})
-                                    self.queue.append(({"type": "button", "code": "touchpad_left", "value": False}, 0))
-                                self.queue.append(({"type": "button", "code": touch, "value": False}, 0))
-                                start["t"] = 0
-                            elif state["id"] != -1 and start["t"] == 0:
-                                evs.append({"type": "button", "code": touch, "value": True})
-                                start["x"], start["y"], start["t"] = state["x"], state["y"], touched
-                    elif self.slot < 2:
-                        self.touchstate[self.slot][code] = ev.value
-                        if code == "x":
-                            x = (min(ev.value, 200) if ev.value < 1720 else ev.value - 1520) / 400
-                            evs.append({"type": "axis", "code": f"touchpad_x{"2" if self.slot == 1 else ""}", "value": x})
-                        elif code == "y":
-                            y = max(min((ev.value - 340) / 200, 1), 0)
-                            evs.append({"type": "axis", "code": f"touchpad_y{"2" if self.slot == 1 else ""}", "value": y})
-            #for ev in evs: logger.info(ev)
+                                    self.queue.append(({"type": "button", "code": "touchpad_left", "value": False}, curr + 0.1))
+                                    self.queue.append(({"type": "button", "code": btn, "value": False}, curr + 0.1))
+                                else:
+                                    evs.append({"type": "button", "code": btn, "value": False})
+                            logger.info(f"{btn} up")
+                            if btn in ("keyboard", "steam_qam", "steam_expanded", "extra_l3"):
+                                evs.append({"type": "button", "code": btn, "value": False})
+                            elif btn == "hhd_qam":
+                                self.emit({"type": "special", "event": "qam_double"})
+                            elif btn == "hhd_expanded":
+                                self.emit({"type": "special", "event": "qam_triple"})
+                            state.t = 0
+                        elif state.id != -1 and state.t == 0:
+                            logger.info(f"btn: {btn}, x: {state.x}, y: {state.y}, t: {state.t}")
+                            if btn in ("touchpad_touch", "touchpad_touch2", "keyboard", "steam_qam", "steam_expanded", "extra_l3"):
+                                evs.append({"type": "button", "code": btn, "value": True})
+                            state.sx, state.sy, state.t, state.btn = state.x, state.y, t, btn
+                        if state.btn in ("touchpad_touch", "touchpad_touch2") and state.t > 0:
+                            evs.append({"type": "axis", "code": f"touchpad_x{"2" if slot == 1 else ""}", "value": state.tx + jitter})
+                            evs.append({"type": "axis", "code": f"touchpad_y{"2" if slot == 1 else ""}", "value": state.ty})
+                elif self.slot < 2:
+                    if code == "x":
+                        state.x = ev.value
+                        state.tx = (min(ev.value, 269) if ev.value < 960 else max(ev.value - 1380, 271)) / 540
+                    elif code == "y":
+                        state.y = ev.value
+                        state.ty = max(min((ev.value - 270) / 270, 1), 0)
+                    elif code == "id":
+                        state.id = ev.value
+            for ev in evs: logger.info(ev)
             return evs
         except Exception as e:
             logger.error(f"Error while producing events: {e}")
@@ -474,7 +512,7 @@ def controller_loop(
     d_kbd_grabbed = False
 
     logger.info("Searching for touchscreen device")
-    d_touchscreen = Touchscreen(vid=[0x0603], pid=[0xF200], required=True, grab=True)
+    d_touchscreen = Touchscreen(conf["touchscreen"], emit, vid=[0x0603], pid=[0xF200], required=True, grab=True)
 
     multiplexer = Multiplexer(
         trigger="analog_to_discrete",

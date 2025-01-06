@@ -770,8 +770,8 @@ class Multiplexer:
             or abs(self.touchpad_down[2] - self.touchpad_y) > 0.13
         ):
             self.touchpad_down[3] = False
-
         for ev in events:
+            #logger.info(ev)
             match ev["type"]:
                 case "axis":
                     match self.imu:
@@ -980,6 +980,10 @@ class Multiplexer:
                             ev["code"] = "extra_l2"
                         elif ev["code"] == "share":
                             ev["code"] = "extra_r2"
+                        elif ev["code"] == "steam_expanded":
+                            ev["code"] = "mode"
+                        elif ev["code"] == "steam_qam":
+                            ev["code"] = "share"
                     
                     if (
                         self.startselect_chord != "disabled" and ev["code"] == "select"

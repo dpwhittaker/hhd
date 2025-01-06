@@ -54,6 +54,7 @@ class RogAllyControllersPlugin(HHDPlugin):
         fix_limits(conf, "controllers.rog_ally.limits", LIMIT_DEFAULTS(self.ally_x))
 
         new_conf = conf["controllers.rog_ally"]
+        new_conf["touchscreen"] = conf["shortcuts.touchscreen"].conf
         if new_conf == self.prev:
             return
         if self.prev is None:

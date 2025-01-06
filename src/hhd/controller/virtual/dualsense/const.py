@@ -166,7 +166,7 @@ get_btn_map = lambda ofs: {
     "extra_l2": BM(((ofs + 9) << 3) + 1),
     "extra_r1": BM(((ofs + 9) << 3) + 2),
     "extra_l1": BM(((ofs + 9) << 3) + 3),
-    "extra_l3": BM(((ofs + 9) << 3) + 4),
+    "extra_l3": BM(((ofs + 9) << 3) + 5),
     "share": BM(((ofs + 9) << 3) + 5),
     "touchpad_touch": BM(((ofs + 32) << 3), flipped=True),
     "touchpad_touch2": BM(((ofs + 36) << 3), flipped=True),

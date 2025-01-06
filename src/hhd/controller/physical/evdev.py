@@ -274,6 +274,8 @@ class GenericGamepadEvdev(Producer, Consumer):
                 continue
             if not matches_patterns(info.get("name", ""), self.name):
                 continue
+            if self.vid[0] == 0x0603 and self.pid[0] == 0xF200:
+                logger.info(f"Opening GenericGamepad device:{d}")
             dev = evdev.InputDevice(d)
             if self.capabilities:
                 matches = True
@@ -308,8 +310,10 @@ class GenericGamepadEvdev(Producer, Consumer):
                 # Close the previous device
                 # Will have been destroyed by hiding
                 dev.close()
+                logger.info("closed previous device")
                 self.dev = evdev.InputDevice(d)
                 if self.grab:
+                    logger.info("grabbing device")
                     self.dev.grab()
                 self.ranges = {
                     a: (i.min, i.max) for a, i in self.dev.capabilities().get(B("EV_ABS"), [])  # type: ignore

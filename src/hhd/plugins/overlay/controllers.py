@@ -732,7 +732,7 @@ def device_shortcut_loop(
             try:
                 if os.stat(name).st_mode & stat.S_IRGRP == 0:
                     continue
-
+                logger.info(f"Overlay opening device: {name}")
                 dev = InputDevice(name)
 
                 if cand["is_touchscreen"] and disable_touchscreens:

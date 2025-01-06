@@ -95,6 +95,7 @@ class OverlayPlugin(HHDPlugin):
             self.ctx = context
             self.has_executable = bool(find_overlay_exe(context))
             self.win_bootnum = get_windows_bootnum()
+            self.touchscreen_trackpads = os.environ.get("HHD_TOUCHSCREEN_TRACKPADS", False)
 
             if bool(os.environ.get("HHD_QAM_KEYBOARD", None)):
                 # Sends the events as ctrl+1, ctrl+2
@@ -208,6 +209,9 @@ class OverlayPlugin(HHDPlugin):
                     touch
                     or conf.get(f"shortcuts.touchscreen.{v}", "disabled") != "disabled"
                 )
+            if self.touchscreen_trackpads:
+                touch = False # touchscreen is grabbed in main device loop, shortcuts handled there
+            
             # ctrl = (
             #     conf.get("shortcuts.controller.xbox_b", "disabled") != "disabled"
             #     or asus_cycle
